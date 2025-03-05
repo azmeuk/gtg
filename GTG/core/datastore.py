@@ -685,7 +685,7 @@ class Datastore:
             for task in self.tasks.data:
                 if self.please_quit:
                     break
-                backend.queue_set_task(task.id)
+                backend.queue_set_task(task)
         t = threading.Thread(target=_internal_flush_all_tasks)
         t.start()
         self.backends[backend_id].start_get_tasks()

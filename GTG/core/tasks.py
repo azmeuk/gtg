@@ -328,19 +328,19 @@ class Task(StoreItem):
     def add_tag(self, tag: Tag) -> None:
         """Add a tag to this task."""
 
-        if isinstance(tag, Tag):
-            if tag not in self.tags:
-                self.tags.add(tag)
+        if not isinstance(tag, Tag):
+            raise ValueError(tag)
 
-                if self.status == Status.ACTIVE:
-                    tag.task_count_open += 1
-                else:
-                    tag.task_count_closed += 1
+        if tag not in self.tags:
+            self.tags.add(tag)
 
-                if self.is_actionable:
-                    tag.task_count_actionable += 1
-        else:
-            raise ValueError
+            if self.status == Status.ACTIVE:
+                tag.task_count_open += 1
+            else:
+                tag.task_count_closed += 1
+
+            if self.is_actionable:
+                tag.task_count_actionable += 1
 
 
     def remove_tag(self, tag_name: str) -> None:
@@ -731,10 +731,13 @@ class TaskStore(BaseStore[Task]):
         return f'Task Store. Holds {len(self.lookup)} task(s)'
 
 
-    def get(self, tid: UUID) -> Task:
+    def get(self, tid: UUID) -> Task | None:
         """Get a task by name."""
 
-        return self.lookup[tid]
+        try:
+            return self.lookup[tid]
+        except KeyError:
+            return None
 
 
     def duplicate_for_recurrent(self, task: Task) -> Task:
