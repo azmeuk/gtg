@@ -2,12 +2,12 @@
  * MAIN WINDOW
  * --------------------------------------------------------------------------------
  */
-.menu-disclose button {
-    min-width: 16px;
+window {
+  border-radius: 6px;
 }
 
-.task-list {
-    border-top: 1px solid rgb(213, 208, 204);
+.menu-disclose button {
+    min-width: 16px;
 }
 
 .dummy {
@@ -20,21 +20,18 @@
   padding: 0;
 }
 
-/*
-    We have to get move the padding into the boxes
-    so the background color of the rows reaches all
-    the way to the edges
-*/
-.task-list row {
-    padding: 0;
-}
-
-.task-list row > box {
-    padding: 15px 16px;
-}
-
 indent, expander{
     -gtk-icon-size: 16px;
+}
+
+.task-list row {
+    padding: 0px;
+}
+
+.task-list .task-box {
+    min-height: 48px;
+    padding-left: 12px;
+    padding-right: 12px;
 }
 
 /* --------------------------------------------------------------------------------
@@ -49,24 +46,6 @@ indent, expander{
  * PREFERENCES
  * --------------------------------------------------------------------------------
  */
-.prefs_list {
-    border: 1px solid alpha(currentColor, 0.2);
-    border-radius: 3px;
-    margin: 4px;
-}
-
-.prefs_list row {
-    border-bottom: solid 1px alpha(currentColor, 0.1);
-}
-
-.dark .prefs_list {
-    border-color: alpha(rgb(0, 0, 0), 0.4);
-}
-
-.dark .prefs_list row {
-    border-bottom-color: alpha(rgb(0, 0, 0), 0.2);
-}
-
 .recurring-active image {
     color: rgb(52, 130, 224);
 }

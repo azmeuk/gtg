@@ -19,8 +19,8 @@
 """Task pane and list."""
 
 from gi.repository import Gtk, GObject, Gdk, Gio, Pango
-from GTG.core.tasks import Task, Status
-from GTG.core.filters import TaskPaneFilter, SearchTaskFilter
+from GTG.core.tasks import Task, Status, FilteredTaskTreeManager
+from GTG.core.filters import TaskFilter
 from GTG.core.sorters import (TaskAddedSorter, TaskDueSorter,
                               TaskModifiedSorter, TaskStartSorter,
                               TaskTagSorter, TaskTitleSorter)
@@ -37,16 +37,16 @@ class TaskBox(Gtk.Box):
 
     def __init__(self, config, is_actionable=False):
         self.config = config
-        super().__init__()
+        super().__init__(valign=Gtk.Align.CENTER)
+
+        self.add_css_class('task-box')
 
         self.expander = Gtk.TreeExpander()
-        self.expander.set_margin_end(6)
         self.expander.add_css_class('arrow-only-expander')
         self.expander.set_indent_for_icon(True)
         self.expander.set_indent_for_depth(True)
 
         self.check = Gtk.CheckButton()
-        self.check.set_margin_end(6)
 
         self.append(self.expander)
         self.append(self.check)
@@ -135,11 +135,6 @@ class TaskPane(Gtk.ScrolledWindow):
         title_box = Gtk.Box()
         title_box.set_valign(Gtk.Align.START)
 
-        title_box.set_margin_top(32)
-        title_box.set_margin_bottom(32)
-        title_box.set_margin_start(24)
-        title_box.set_margin_end(24)
-
         self.title = Gtk.Label()
         self.title.set_halign(Gtk.Align.START)
         self.title.set_hexpand(True)
@@ -157,12 +152,9 @@ class TaskPane(Gtk.ScrolledWindow):
         # Task List
         # -------------------------------------------------------------------------------
 
-        self.search_filter = SearchTaskFilter(self.ds, pane)
-        self.task_filter = TaskPaneFilter(self.app.ds, pane)
-
-        self.filtered = Gtk.FilterListModel()
-        self.filtered.set_model(self.app.ds.tasks.tree_model)
-        self.filtered.set_filter(self.task_filter)
+        self.task_filter = TaskFilter(self.app.ds, pane)
+        self.filter_manager = FilteredTaskTreeManager(self.app.ds.tasks,self.task_filter)
+        self.filtered = self.filter_manager.get_tree_model()
 
         self.sort_model = Gtk.TreeListRowSorter()
         self.sort_model.set_sorter(TaskTitleSorter())
@@ -180,6 +172,7 @@ class TaskPane(Gtk.ScrolledWindow):
 
         view = Gtk.ListView.new(self.task_selection, tasks_signals)
         view.set_show_separators(True)
+        view.add_css_class('rich-list')
         view.add_css_class('task-list')
 
         view_drop = Gtk.DropTarget.new(Task, Gdk.DragAction.COPY)
@@ -230,10 +223,8 @@ class TaskPane(Gtk.ScrolledWindow):
     def set_search_query(self, query) -> None:
         """Change tasks filter."""
 
-        self.filtered.set_filter(self.search_filter)
-        self.search_filter.set_query(query)
-        self.search_filter.pane = self.pane
-        self.search_filter.changed(Gtk.FilterChange.DIFFERENT)
+        self.task_filter.set_pane(self.pane)
+        self.task_filter.set_query(query)
         self.searching = True
 
 
@@ -242,39 +233,23 @@ class TaskPane(Gtk.ScrolledWindow):
 
         if self.searching:
             self.searching = False
-            self.filtered.set_filter(self.task_filter)
 
         self.pane = pane
-        self.task_filter.pane = pane
-        self.task_filter.expand = True
-        self.task_filter.changed(Gtk.FilterChange.DIFFERENT)
+        self.task_filter.set_pane(pane)
         self.set_title()
 
 
     def set_filter_tags(self, tags=[]) -> None:
         """Change tasks filter."""
 
-        if self.searching:
-            self.search_filter.tags = tags
-            self.search_filter.changed(Gtk.FilterChange.DIFFERENT)
-        else:
-            self.task_filter.tags = tags
-            self.task_filter.no_tags = False
-            self.task_filter.changed(Gtk.FilterChange.DIFFERENT)
-
+        self.task_filter.set_required_tags(tags)
         self.set_title()
+
 
     def set_filter_notags(self, tags=[]) -> None:
         """Change tasks filter."""
 
-        if self.searching:
-            self.search_filter.tags = []
-            self.search_filter.changed(Gtk.FilterChange.DIFFERENT)
-        else:
-            self.task_filter.tags = []
-            self.task_filter.no_tags = True
-            self.task_filter.changed(Gtk.FilterChange.DIFFERENT)
-
+        self.task_filter.allow_untagged_only()
         self.set_title()
 
 
@@ -336,7 +311,7 @@ class TaskPane(Gtk.ScrolledWindow):
     def select_last(self) -> None:
         """Select last position in the task list."""
 
-        position = self.app.ds.tasks.tree_model.get_n_items()
+        position = self.filtered.get_n_items()
         self.task_selection.select_item(position - 1, True)
 
 
@@ -428,7 +403,7 @@ class TaskPane(Gtk.ScrolledWindow):
         color.set_vexpand(False)
         color.set_valign(Gtk.Align.CENTER)
 
-        separator.set_margin_end(12)
+        separator.set_margin_end(6)
 
         def on_notify_visibility(obj, gparamstring):
             val = ((recurring_icon.is_visible()
@@ -441,21 +416,17 @@ class TaskPane(Gtk.ScrolledWindow):
         for widget in (recurring_icon, due_icon, start_icon, color, icons):
             widget.connect("notify::visible", on_notify_visibility)
 
-        icons.set_margin_end(6)
-
         label.set_hexpand(True)
         label.set_ellipsize(Pango.EllipsizeMode.END)
-        label.set_margin_end(12)
+        label.set_margin_end(6)
         label.set_xalign(0)
 
-        recurring_icon.set_margin_end(16)
+        recurring_icon.set_margin_end(12)
         recurring_icon.set_label('\u2B6E')
 
-        due_icon.set_margin_end(6)
-        due.set_margin_end(24)
+        due.set_margin_end(18)
 
-        start_icon.set_margin_end(6)
-        start.set_margin_end(12)
+        start.set_margin_end(6)
 
         # DnD stuff
         source = Gtk.DragSource()
@@ -520,7 +491,8 @@ class TaskPane(Gtk.ScrolledWindow):
 
         listitem.bindings = [
             item.bind_property('has_children', box, 'has_children', BIND_FLAGS),
-            item.bind_property('has_children', expander, 'hide-expander', BIND_FLAGS,lambda _,x: not x),
+            item.bind_property('has_children', expander, 'hide-expander', BIND_FLAGS
+                               ,lambda _,x: not self.filter_manager.has_matching_children(item)),
 
             item.bind_property('title', label, 'label', BIND_FLAGS),
             item.bind_property('excerpt', box, 'tooltip-text', BIND_FLAGS),
@@ -655,7 +627,7 @@ class TaskPane(Gtk.ScrolledWindow):
     def on_toplevel_tag_drop(self, drop_target, task, x, y):
         if task.parent:
             self.ds.tasks.unparent(task.id)
-            self.ds.tasks.tree_model.emit('items-changed', 0, 0, 0)
+            self.filtered.emit('items-changed', 0, 0, 0)
             self.refresh()
 
             return True
