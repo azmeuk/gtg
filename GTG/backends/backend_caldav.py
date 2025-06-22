@@ -152,7 +152,7 @@ class Backend(PeriodicImportBackend):
 
     def _set_task(self, task: Task) -> None:
         logger.debug('set_task todo for %r', task.id)
-        seq_value = SEQUENCE.get_gtg(task, self.namespace)
+        seq_value = SEQUENCE.get_gtg(task, self.namespace, self.datastore)
         SEQUENCE.write_gtg(task, seq_value + 1, self.namespace)
         todo, calendar = self._get_todo_and_calendar(task)
         if not calendar:
@@ -167,7 +167,7 @@ class Backend(PeriodicImportBackend):
                 return
             # updating vtodo content
             Translator.fill_vtodo(task, calendar.name, self.namespace,
-                                  todo.instance.vtodo)
+                                  todo.instance.vtodo, self.datastore)
             logger.info('SYNCING updating todo %r', todo)
             try:
                 todo.save()
@@ -191,7 +191,7 @@ class Backend(PeriodicImportBackend):
     def _create_todo(self, task: Task, calendar: iCalendar):
         logger.info('SYNCING creating todo for %r', task)
         new_todo, new_vtodo = None, Translator.fill_vtodo(
-            task, calendar.name, self.namespace)
+            task, calendar.name, self.namespace, self.datastore)
         try:
             new_todo = calendar.add_todo(new_vtodo.serialize())
         except caldav.lib.error.DAVError:
@@ -270,6 +270,7 @@ class Backend(PeriodicImportBackend):
             parent = PARENT_FIELD.get_dav(todo)
             if parent:
                 children_by_parent[parent[0]].append(todo)
+
         todos_by_uid = {UID_FIELD.get_dav(todo): todo for todo in todos}
         for uid, children in children_by_parent.items():
             if uid not in todos_by_uid:
@@ -314,7 +315,7 @@ class Backend(PeriodicImportBackend):
 
     def _update_task(self, task: Task, todo: iCalendar, force: bool = False):
         if not force:
-            task_seq = SEQUENCE.get_gtg(task, self.namespace)
+            task_seq = SEQUENCE.get_gtg(task, self.namespace, self.datastore)
             todo_seq = SEQUENCE.get_dav(todo)
             if task_seq >= todo_seq:
                 return 'unchanged'
@@ -355,7 +356,7 @@ class Backend(PeriodicImportBackend):
     def _get_todo_and_calendar(self, task: Task):
         """For a given task, try to get the todo out of the cache and figures
         out its calendar if one is linked to it"""
-        todo, calendar = self._cache.get_todo(UID_FIELD.get_gtg(task)), None
+        todo, calendar = self._cache.get_todo(UID_FIELD.get_gtg(task, datastore=self.datastore)), None
         # lookup by task
         for __, calendar in self._cache.calendars:
             if CATEGORIES.has_calendar_tag(task, calendar):
@@ -395,7 +396,7 @@ class Field:
     def _is_value_allowed(self, value):
         return value not in self.ignored_values
 
-    def get_gtg(self, task: Task, namespace: str = None):
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None):
         "Extract value from GTG.core.task.Task according to specified getter"
         return getattr(task, self.task_attr_name)
 
@@ -410,9 +411,9 @@ class Field:
         vtodo_val.value = value
         return vtodo_val
 
-    def set_dav(self, task: Task, vtodo: iCalendar, namespace: str) -> None:
+    def set_dav(self, task: Task, vtodo: iCalendar, namespace: str, datastore = None) -> None:
         """Will extract value from GTG.core.task.Task and set it to vTodo"""
-        value = self.get_gtg(task, namespace)
+        value = self.get_gtg(task, namespace, datastore)
         if self._is_value_allowed(value):
             self.write_dav(vtodo, value)
         else:
@@ -442,7 +443,7 @@ class Field:
     def is_equal(self, task: Task, namespace: str, todo=None, vtodo=None):
         assert todo is not None or vtodo is not None
         dav = self.get_dav(todo, vtodo)
-        gtg = self.get_gtg(task, namespace)
+        gtg = self.get_gtg(task, namespace, datastore)
         if dav != gtg:
             logger.debug('%r has differing values (DAV) %r!=%r (GTG)',
                          self, gtg, dav)
@@ -501,13 +502,18 @@ class DateField(Field):
             value = self._normalize(value)
             if not value.tzinfo:  # considering naive is local tz
                 value = value.replace(tzinfo=LOCAL_TIMEZONE)
+
             if value.tzinfo != UTC:  # forcing UTC for value to write on dav
                 value = (value - value.utcoffset()).replace(tzinfo=UTC)
+
         vtodo_val = super().write_dav(vtodo, value)
+
         if isinstance(value, date) and not isinstance(value, datetime):
             vtodo_val.params['VALUE'] = ['DATE']
+
         if fuzzy_value:
             vtodo_val.params[self.FUZZY_MARK] = [fuzzy_value]
+
         return vtodo_val
 
     def get_dav(self, todo=None, vtodo=None) -> Date:
@@ -516,25 +522,30 @@ class DateField(Field):
         value = super().get_dav(todo, vtodo)
         if todo:
             vtodo = todo.instance.vtodo
+
         todo_value = vtodo.contents.get(self.dav_name)
         if todo_value and todo_value[0].params.get(self.FUZZY_MARK):
             return Date(todo_value[0].params[self.FUZZY_MARK][0])
+
         if isinstance(value, (date, datetime)):
             value = self._normalize(value)
+
         try:
             return Date(value)
         except ValueError:
             logger.error("Coudln't translate value %r", value)
             return Date.no_date()
 
-    def get_gtg(self, task: Task, namespace: str = None):
-        gtg_date = super().get_gtg(task, namespace)
-        if isinstance(gtg_date, Date):
-            if gtg_date.accuracy in {Accuracy.date, Accuracy.timezone,
-                                     Accuracy.datetime}:
-                return Date(self._normalize(gtg_date.dt_value))
-            return gtg_date
-        return Date(self._normalize(gtg_date))
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None):
+        gtg_date = super().get_gtg(task, namespace, datastore)
+        if not isinstance(gtg_date, Date):
+            return Date(self._normalize(gtg_date))
+
+        if gtg_date.accuracy in {Accuracy.date, Accuracy.timezone,
+                                 Accuracy.datetime}:
+            return Date(self._normalize(gtg_date.dt_value))
+
+        return gtg_date
 
 
 class UTCDateTimeField(DateField):
@@ -568,7 +579,7 @@ class StatusField(Field):
         self.clean_dav(vtodo)
         vtodo.add(self.dav_name).value = value
 
-    def get_gtg(self, task: Task, namespace: str = None) -> str:
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> str:
         active, done = 0, 0
         for subtask in self._browse_subtasks(task):
             if subtask.is_active:
@@ -596,15 +607,17 @@ class StatusField(Field):
 
 class PercentCompleteField(Field):
 
-    def get_gtg(self, task: Task, namespace: str = None) -> str:
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> str:
         total_cnt, done_cnt = 0, 0
         for subtask in self._browse_subtasks(task):
             if subtask.status != Status.DISMISSED:
                 total_cnt += 1
                 if subtask.status == Status.DONE:
                     done_cnt += 1
+
         if total_cnt:
             return str(int(100 * done_cnt / total_cnt))
+
         return '0'
 
 
@@ -615,26 +628,28 @@ class CategoriesField(Field):
     def to_tag(cls, category, prefix=''):
         return f"{prefix}{category.replace(' ', cls.CAT_SPACE)}"
 
-    def get_gtg(self, task: Task, namespace: str = None) -> list[str]:
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> list[str]:
         return [tag.name.lstrip('@').replace(self.CAT_SPACE, ' ')
-                for tag in super().get_gtg(task)
+                for tag in super().get_gtg(task, datastore=datastore)
                 if not tag.name.lstrip('@').startswith(DAV_TAG_PREFIX)]
 
     def get_dav(self, todo: iCalendar = None, vtodo=None):
         if todo:
             vtodo = todo.instance.vtodo
+
         value_list = []
         for sub_value in vtodo.contents.get(self.dav_name, []):
             for value in sub_value.value:
                 value = self.to_tag(value).strip()
                 if value and self._is_value_allowed(value):
                     value_list.append(self.to_tag(value))
+
         return value_list
 
     def set_gtg(self, todo: iCalendar, task: Task, datastore,
                 namespace: str = None) -> None:
         remote_tags = {self.to_tag(categ) for categ in self.get_dav(todo)}
-        local_tags = {tag_name for tag_name in super().get_gtg(task)}
+        local_tags = {tag_name for tag_name in super().get_gtg(task, datastore=datastore)}
 
         for to_add in (remote_tags - local_tags):
             try:
@@ -656,7 +671,7 @@ class CategoriesField(Field):
 
 class AttributeField(Field):
 
-    def get_gtg(self, task: Task, namespace: str = None) -> str:
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> str:
         return task.get_attribute(self.dav_name, namespace=namespace)
 
     def write_gtg(self, task: Task, value, namespace: str = None):
@@ -671,9 +686,9 @@ class AttributeField(Field):
 
 class SequenceField(AttributeField):
 
-    def get_gtg(self, task: Task, namespace: str = None):
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None):
         try:
-            return int(super().get_gtg(task, namespace) or '0')
+            return int(super().get_gtg(task, namespace, datastore) or '0')
         except ValueError:
             return 0
 
@@ -683,9 +698,9 @@ class SequenceField(AttributeField):
         except ValueError:
             return 0
 
-    def set_dav(self, task: Task, vtodo: iCalendar, namespace: str):
+    def set_dav(self, task: Task, vtodo: iCalendar, namespace: str, datastore = None):
         try:
-            self.write_dav(vtodo, str(self.get_gtg(task, namespace)))
+            self.write_dav(vtodo, str(self.get_gtg(task, namespace, datastore)))
         except ValueError:
             self.write_dav(vtodo, '1')
 
@@ -708,12 +723,12 @@ class DescriptionField(Field):
             return hash_val, desc[0].value
         return None, ''
 
-    def get_gtg(self, task: Task, namespace: str = None) -> tuple:
-        description = self._extract_plain_text(task)
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> tuple:
+        description = self._extract_plain_text(task, datastore)
         return self._get_content_hash(description), description
 
     def is_equal(self, task: Task, namespace: str, todo=None, vtodo=None):
-        gtg_hash, gtg_value = self.get_gtg(task, namespace)
+        gtg_hash, gtg_value = self.get_gtg(task, namespace, datastore)
         dav_hash, dav_value = self.get_dav(todo, vtodo)
         if dav_hash == gtg_hash:
             logger.debug('%r calculated hash matches', self)
@@ -747,7 +762,7 @@ class DescriptionField(Field):
                 new_line += split.strip()
         return new_line
 
-    def _extract_plain_text(self, task: Task) -> str:
+    def _extract_plain_text(self, task: Task, datastore) -> str:
         """Will extract plain text from task content, replacing subtask
         referenced in the text by their proper titles"""
         result = ''
@@ -761,7 +776,7 @@ class DescriptionField(Field):
                 if new_line:
                     result += new_line + '\n'
             elif line.startswith('{!') and line.endswith('!}'):
-                subtask = task.req.get_task(line[2:-2].strip())
+                subtask = datastore.tasks.get(line[2:-2].strip())
                 if not subtask:
                     continue
                 if subtask.status == Status.DONE:
@@ -778,8 +793,10 @@ class DescriptionField(Field):
         if content:
             vtodo_val = super().write_dav(vtodo, content)
             vtodo_val.params[self.HASH_PARAM] = [hash_]
+
         else:
             self.clean_dav(vtodo)
+
         return vtodo_val
 
 
@@ -799,6 +816,12 @@ class RelatedToField(Field):
         reltype = sub_value.params.get('RELTYPE') or [self.DEFAULT_RELTYPE]
         return len(reltype) == 1 and reltype[0] == self.reltype
 
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> str:
+        value = super().get_gtg(task, namespace, datastore)
+        if self.reltype == "PARENT":
+            return str(value.id) if value else None
+        return [str(related_task.id) for related_task in value] if value else []
+
     def clean_dav(self, vtodo: iCalendar):
         value = vtodo.contents.get(self.dav_name)
         if value:
@@ -811,9 +834,10 @@ class RelatedToField(Field):
 
     def write_dav(self, vtodo: iCalendar, value):
         self.clean_dav(vtodo)
-        for related_uid in value:
+        uuids = [value] if self.reltype == "PARENT" else value
+        for related_uid in uuids:
             related = vtodo.add(self.dav_name)
-            related.value = related_uid
+            related.value = str(related_uid)
             related.params['RELTYPE'] = [self.reltype]
 
     def get_dav(self, todo=None, vtodo=None):
@@ -825,6 +849,10 @@ class RelatedToField(Field):
             for sub_value in value:
                 if self._fit_reltype(sub_value):
                     result.append(sub_value.value)
+
+        if self.reltype == "PARENT":
+            return result[0] if result else None
+
         return result
 
     @staticmethod
@@ -837,11 +865,11 @@ class RelatedToField(Field):
 
     def set_gtg(self, todo: iCalendar, task: Task, datastore,
                 namespace: str = None) -> None:
-        if self.get_dav(todo) == self.get_gtg(task, namespace):
+        if self.get_dav(todo) == self.get_gtg(task, namespace, datastore):
             return  # do not edit if equal
 
         target_uids = set(self.get_dav(todo))
-        gtg_uids = set(self.get_gtg(task, namespace))
+        gtg_uids = set(self.get_gtg(task, namespace, datastore))
         if self.task_add_func_name:
             for to_add_uid in (target_uids - gtg_uids):
                 child = datastore.tasks.get(to_add_uid)
@@ -863,16 +891,14 @@ class RelatedToField(Field):
 
 
 class OrderField(Field):
-
-    def get_gtg(self, task: Task, namespace: str = None):
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None):
         parent = task.parent
         if not parent:
             return
-        uid = UID_FIELD.get_gtg(task, namespace)
-        return parent.get_child_index(uid)
+        return parent.children.index(task)
 
-    def set_dav(self, task: Task, vtodo: iCalendar, namespace: str) -> None:
-        parent_index = self.get_gtg(task, namespace)
+    def set_dav(self, task: Task, vtodo: iCalendar, namespace: str, datastore = None) -> None:
+        parent_index = self.get_gtg(task, namespace, datastore)
         if parent_index is not None:
             return self.write_dav(vtodo, str(parent_index))
 
@@ -880,7 +906,7 @@ class OrderField(Field):
 class RecurrenceField(Field):
     DAV_DAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']
 
-    def get_gtg(self, task: Task, namespace: str = None) -> tuple:
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None) -> tuple:
         return task._is_recurring, task.recurring_term
 
     def get_dav(self, todo=None, vtodo=None) -> tuple:
@@ -920,10 +946,10 @@ class RecurrenceField(Field):
 
 class DueDateField(DateField):
 
-    def get_gtg(self, task: Task, namespace: str = None):
+    def get_gtg(self, task: Task, namespace: str = None, datastore = None):
         """Enforcing Caldav restriction, due can't be before start"""
-        due = super().get_gtg(task, namespace)
-        start = DTSTART.get_gtg(task, namespace)
+        due = super().get_gtg(task, namespace, datastore)
+        start = DTSTART.get_gtg(task, namespace, datastore)
         if not due or not start:
             return due
 
@@ -937,7 +963,7 @@ DTSTART = DateField('dtstart', 'date_start')
 UID_FIELD = Field('uid', 'id')
 SEQUENCE = SequenceField('sequence', '<fake attribute>', '')
 CATEGORIES = CategoriesField('categories', 'tags', ignored_values=[[]])
-PARENT_FIELD = RelatedToField('related-to', '_parent',
+PARENT_FIELD = RelatedToField('related-to', 'parent',
                          task_remove_func_name='remove_parent',
                          reltype='parent')
 CHILDREN_FIELD = RelatedToField('related-to', 'children',
@@ -973,7 +999,7 @@ class Translator:
 
     @classmethod
     def fill_vtodo(cls, task: Task, calendar_name: str, namespace: str,
-                   vtodo: iCalendar = None) -> iCalendar:
+                   vtodo: iCalendar = None, datastore=None) -> iCalendar:
         vcal = None
         if vtodo is None:
             vcal = cls._get_new_vcal()
@@ -982,15 +1008,17 @@ class Translator:
         # always write a DTSTAMP field to the `now`
         cls.DTSTAMP_FIELD.write_dav(vtodo, datetime.now(LOCAL_TIMEZONE))
         for field in cls.fields:
+            if field.dav_name == "uid":
+                breakpoint()
             if field.dav_name == 'uid' and UID_FIELD.get_dav(vtodo=vtodo):
                 # not overriding if already set from cache
                 continue
-            field.set_dav(task, vtodo, namespace)
+            field.set_dav(task, vtodo, namespace, datastore)
 
         # NOTE: discarding related-to parent from sync down
         # due to bug on set_parent
-        PARENT_FIELD.set_dav(task, vtodo, namespace)
-        SORT_ORDER.set_dav(task, vtodo, namespace)
+        PARENT_FIELD.set_dav(task, vtodo, namespace, datastore)
+        SORT_ORDER.set_dav(task, vtodo, namespace, datastore)
         return vcal
 
     @classmethod

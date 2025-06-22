@@ -1,5 +1,4 @@
 import re
-import unittest
 from datetime import date, datetime, timedelta
 from unittest import TestCase
 
@@ -11,6 +10,7 @@ from GTG.backends.backend_caldav import (CATEGORIES, CHILDREN_FIELD,
                                          Backend, DueDateField, Translator)
 from GTG.core.datastore import Datastore
 from GTG.core.dates import LOCAL_TIMEZONE, Date
+from GTG.core.tasks import Status
 from GTG.core.tasks import Task
 from unittest.mock import Mock, patch
 from tests.test_utils import MockTimer
@@ -78,7 +78,6 @@ X-APPLE-SORT-ORDER:1\r
 END:VTODO\r\n"""
 
 
-@unittest.skip('TODO Ignoring CalDAV for now')
 class CalDAVTest(TestCase):
 
     @staticmethod
@@ -109,6 +108,7 @@ class CalDAVTest(TestCase):
         return calendar
 
     def test_translate_from_vtodo(self):
+        datastore, backend = self._setup_backend()
         DESCRIPTION = Translator.fields[1]
         self.assertEqual(DESCRIPTION.dav_name, 'description')
         todo = self._get_todo(VTODO_GRAND_CHILD)
@@ -119,28 +119,28 @@ class CalDAVTest(TestCase):
         self.assertTrue(isinstance(uid, str), f"should be str is {uid!r}")
         self.assertEqual(uid, UID_FIELD.get_dav(vtodo=todo.instance.vtodo))
         task = Task(uid, Mock())
-        Translator.fill_task(todo, task, NAMESPACE)
-        self.assertEqual('date', task.get_due_date().accuracy.value)
+        Translator.fill_task(todo, task, NAMESPACE, datastore)
+        self.assertEqual('date', task.date_due.accuracy.value)
         vtodo = Translator.fill_vtodo(task, todo.parent.name, NAMESPACE)
         for field in Translator.fields:
             if field.dav_name in DAV_IGNORE:
                 continue
-            self.assertTrue(field.is_equal(task, NAMESPACE, todo))
-            self.assertTrue(field.is_equal(task, NAMESPACE, vtodo=vtodo.vtodo))
+            self.assertTrue(field.is_equal(task, NAMESPACE, todo), f"{field.get_gtg(task, NAMESPACE)} != {field.get_dav(todo)}")
+            self.assertTrue(field.is_equal(task, NAMESPACE, vtodo=vtodo.vtodo), f"{field.get_gtg(task, NAMESPACE)} != {field.get_dav(vtodo=vtodo)}")
         vtodo.vtodo.contents['description'][0].value = 'changed value'
         self.assertTrue(DESCRIPTION.is_equal(task, NAMESPACE, todo), 'same '
                         'hashes should prevent changes on vTodo to be noticed')
-        task.set_text(task.get_text() + 'more content')
+        task.content = task.content + 'more content'
         self.assertFalse(DESCRIPTION.is_equal(task, NAMESPACE, todo))
 
     def test_translate_from_task(self):
         now, today = datetime.now(), date.today()
         task = Task('uuid', Mock())
         task.set_title('holy graal')
-        task.set_text('the knights who says ni')
+        task.content = 'the knights who says ni'
         task.set_recurring(True, 'other-day')
-        task.set_start_date(today)
-        task.set_due_date('soon')
+        task.date_start = Date(today)
+        task.date_due = 'soon'
         task.set_closed_date(now)
         vtodo = Translator.fill_vtodo(task, 'My Calendar Name', NAMESPACE)
         for field in Translator.fields:
@@ -170,8 +170,8 @@ class CalDAVTest(TestCase):
                         f"missing {today_in_utc} from {serialized}")
         # emptying date by setting None or no_date
         task.set_closed_date(Date.no_date())
-        task.set_due_date(None)
-        task.set_start_date('')
+        task.date_due = None
+        task.date_start = None
         vtodo = Translator.fill_vtodo(task, 'My Calendar Name', NAMESPACE)
         serialized = vtodo.serialize()
         self.assertTrue("CATEGORIES:" not in serialized)
@@ -181,45 +181,41 @@ class CalDAVTest(TestCase):
 
     def test_translate(self):
         datastore = Datastore()
-        root_task = datastore.task_factory('root-task', newtask=True)
-        root_task.add_tag('@my-tag')
-        root_task.add_tag('@my-other-tag')
-        root_task.set_title('my task')
-        datastore.push_task(root_task)
-        child_task = datastore.task_factory('child-task', newtask=True)
-        child_task.set_title('my first child')
-        child_task.add_tag('@my-tag')
-        child_task.add_tag('@my-other-tag')
-        child_task.set_text("@my-tag, @my-other-tag, \n\ntask content")
-        datastore.push_task(child_task)
-        root_task.add_child(child_task.get_id())
-        child2_task = datastore.task_factory('done-child-task', newtask=True)
-        child2_task.set_title('my done child')
-        child2_task.add_tag('@my-tag')
-        child2_task.add_tag('@my-other-tag')
-        child2_task.set_text("@my-tag, @my-other-tag, \n\nother task txt")
-        child2_task.set_status(Task.STA_DONE)
-        datastore.push_task(child2_task)
-        root_task.add_child(child2_task.get_id())
-        root_task.set_text(f"@my-tag, @my-other-tag\n\nline\n"
-                           f"{{!{child_task.get_id()}!}}\n"
-                           f"{{!{child2_task.get_id()}!}}\n")
-        self.assertEqual([child_task.get_id(), child2_task.get_id()],
-                         root_task.get_children())
-        self.assertEqual([root_task.get_id()], child_task.get_parents())
-        self.assertEqual([], PARENT_FIELD.get_gtg(root_task, NAMESPACE))
-        self.assertEqual(['child-task', 'done-child-task'],
+        my_tag = datastore.tags.new('@my-tag')
+        my_other_tag = datastore.tags.new('@my-other-tag')
+        root_task = datastore.tasks.new('my task')
+        child_task = datastore.tasks.new('child-task', parent=root_task.id)
+
+        child_task.title = 'my first child'
+        child_task.add_tag(my_tag)
+        child_task.add_tag(my_other_tag)
+        child_task.content = "@my-tag, @my-other-tag, \n\ntask content"
+
+        child2_task = datastore.tasks.new('done-child-task', parent=root_task.id)
+        child2_task.title = 'my done child'
+        child2_task.add_tag(my_tag)
+        child2_task.add_tag(my_tag)
+        child2_task.content = "@my-tag, @my-other-tag, \n\nother task txt"
+        child2_task.status = Status.DONE
+        root_task.content = (f"@my-tag, @my-other-tag\n\nline\n"
+                           f"{{!{child_task.id}!}}\n"
+                           f"{{!{child2_task.id}!}}\n")
+        self.assertEqual([child_task, child2_task],
+                         root_task.children)
+        self.assertEqual(root_task, child_task.parent)
+        self.assertEqual(None, PARENT_FIELD.get_gtg(root_task, NAMESPACE))
+        self.assertEqual([str(child_task.id), str(child2_task.id)],
                          CHILDREN_FIELD.get_gtg(root_task, NAMESPACE))
-        self.assertEqual(['root-task'],
+        self.assertEqual(str(root_task.id),
                          PARENT_FIELD.get_gtg(child_task, NAMESPACE))
         self.assertEqual([], CHILDREN_FIELD.get_gtg(child_task, NAMESPACE))
-        root_vtodo = Translator.fill_vtodo(root_task, 'calname', NAMESPACE)
-        child_vtodo = Translator.fill_vtodo(child_task, 'calname', NAMESPACE)
-        child2_vtodo = Translator.fill_vtodo(child2_task, 'calname', NAMESPACE)
-        self.assertEqual([], PARENT_FIELD.get_dav(vtodo=root_vtodo.vtodo))
-        self.assertEqual(['child-task', 'done-child-task'],
+        root_vtodo = Translator.fill_vtodo(root_task, 'calname', NAMESPACE, datastore=datastore)
+        child_vtodo = Translator.fill_vtodo(child_task, 'calname', NAMESPACE, datastore=datastore)
+        child2_vtodo = Translator.fill_vtodo(child2_task, 'calname', NAMESPACE, datastore=datastore)
+        self.assertEqual(None, PARENT_FIELD.get_dav(vtodo=root_vtodo.vtodo))
+        self.assertEqual([str(child_task.id), str(child2_task.id)],
                          CHILDREN_FIELD.get_dav(vtodo=root_vtodo.vtodo))
-        self.assertEqual(['root-task'],
+        self.assertEqual(str(root_task.id),
                          PARENT_FIELD.get_dav(vtodo=child_vtodo.vtodo))
         self.assertEqual([], CHILDREN_FIELD.get_dav(vtodo=child_vtodo.vtodo))
         self.assertTrue('\r\nRELATED-TO;RELTYPE=CHILD:child-task\r\n'
@@ -254,11 +250,11 @@ class CalDAVTest(TestCase):
             = [calendar]
         datastore, backend = self._setup_backend()
 
-        self.assertEqual(4, len(datastore.get_all_tasks()))
+        self.assertEqual(4, len(datastore.tasks.task_count_all))
         task = datastore.get_task('ROOT')
         self.assertIsNotNone(task)
         self.assertEqual(['CHILD', 'CHILD-PARENT'],
-                         [subtask.get_id() for subtask in task.get_subtasks()])
+                         [subtask.id for subtask in task.get_subtasks()])
         self.assertEqual(
             0, len(datastore.get_task('CHILD').get_subtasks()))
         self.assertEqual(
@@ -291,7 +287,7 @@ class CalDAVTest(TestCase):
         # syncing with missing and updated todo, no change
         task = datastore.get_task(child_todo.instance.vtodo.uid.value)
         backend.do_periodic_import()
-        self.assertEqual(4, len(datastore.get_all_tasks()),
+        self.assertEqual(4, len(datastore.tasks.task_count_all),
                          "no not found raised, no reason to remove tasks")
         self.assertEqual('my child summary', task.get_title(), "title shoul"
                          "dn't have change because sequence wasn't updated")
@@ -300,7 +296,7 @@ class CalDAVTest(TestCase):
         calendar.todo_by_uid.side_effect = NotFoundError
         child_todo.instance.vtodo.contents['sequence'][0].value = '2'
         backend.do_periodic_import()
-        self.assertEqual(3, len(datastore.get_all_tasks()))
+        self.assertEqual(3, len(datastore.tasks.task_count_all))
         self.assertEqual('new summary', task.get_title())
 
         # set_task no change, no update
@@ -309,7 +305,7 @@ class CalDAVTest(TestCase):
         child_todo.delete.assert_not_called()
         calendar.add_todo.assert_not_called()
         # set_task, with ignorable changes
-        task.set_status(task.STA_DONE)
+        task.set_status(Status.DONE)
         backend.set_task(task)
         child_todo.save.assert_called_once()
         calendar.add_todo.assert_not_called()
@@ -360,7 +356,7 @@ class CalDAVTest(TestCase):
         dav_client.return_value.principal.return_value.calendars.return_value \
             = [calendar1, calendar2]
         datastore, backend = self._setup_backend()
-        self.assertEqual(1, len(datastore.get_all_tasks()))
+        self.assertEqual(1, len(datastore.tasks.task_count_all))
         task = datastore.get_task(UID_FIELD.get_dav(todo))
         self.assertTrue(CATEGORIES.has_calendar_tag(task, calendar1))
         self.assertFalse(CATEGORIES.has_calendar_tag(task, calendar2))
@@ -387,9 +383,9 @@ class CalDAVTest(TestCase):
             = [calendar]
         datastore, backend = self._setup_backend()
         uid = UID_FIELD.get_dav(todo)
-        self.assertEqual(1, len(datastore.get_all_tasks()))
+        self.assertEqual(1, len(datastore.tasks.task_count_all))
         task = datastore.get_task(uid)
-        self.assertEqual(Task.STA_ACTIVE, task.get_status())
+        self.assertEqual(Status.ACTIVE, task.get_status())
         calendar.todos.assert_called_once()
         calendar.todo_by_uid.assert_not_called()
         calendar.todos.reset_mock()
@@ -401,19 +397,19 @@ class CalDAVTest(TestCase):
         calendar.todos.assert_called_once()
         calendar.todo_by_uid.assert_called_once()
 
-        self.assertEqual(1, len(datastore.get_all_tasks()))
+        self.assertEqual(1, len(datastore.tasks.task_count_all))
         task = datastore.get_task(uid)
-        self.assertEqual(Task.STA_DONE, task.get_status())
+        self.assertEqual(Status.DONE, task.get_status())
 
     def test_due_date_caldav_restriction(self):
         task = Task('uid', Mock())
         later = datetime(2021, 11, 24, 21, 52, 45)
         before = later - timedelta(days=1)
-        task.set_start_date(later)
-        task.set_due_date(before)
-        field = DueDateField('due', 'get_due_date_constraint', 'set_due_date')
+        task.date_start = Date(later)
+        task.date_due = Date(before)
+        field = DueDateField('due', 'date_due')
         self.assertEqual(later, field.get_gtg(task, '').dt_value)
 
-        task.set_start_date(before)
-        task.set_due_date(later)
+        task.date_start = Date(before)
+        task.date_due = Date(later)
         self.assertEqual(later, field.get_gtg(task, '').dt_value)
